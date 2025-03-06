@@ -8,6 +8,24 @@ import (
 	"sync"
 )
 
+type Write struct {
+	Key string
+	Val int
+}
+
+type Read struct {
+	Key string
+}
+
+type AddServer struct {
+	ServerId uint64
+	Addr     net.Addr
+}
+
+type RemoveServers struct {
+	ServerIds []int
+}
+
 type Server struct {
 	id        uint64
 	mu        sync.Mutex
@@ -18,8 +36,7 @@ type Server struct {
 	quit      chan interface{}
 	wg        sync.WaitGroup
 
-	node *Node
-	// node       *RaftNode
+	node       *Node
 	db         *Database
 	commitChan chan CommitEntry
 	ready      <-chan interface{}
@@ -27,20 +44,19 @@ type Server struct {
 
 func CreateServer(
 	serverId uint64,
-	peerList Set,
 	db *Database,
 	ready <-chan interface{},
 	commitChan chan CommitEntry,
-) *Server {
+) (*Server, error) {
 	server := new(Server)
 	server.id = serverId
-	server.peerList = peerList
+	server.peerList = makeSet()
 	server.peers = make(map[uint64]*rpc.Client)
 	server.db = db
 	server.ready = ready
 	server.commitChan = commitChan
 	server.quit = make(chan interface{})
-	return server
+	return server, nil
 }
 
 func (server *Server) ConnectionAccept() {
@@ -148,5 +164,29 @@ func (server *Server) RPC(peerId uint64, rpcCall string, args interface{}, reply
 		return fmt.Errorf("[%d] RPC Call to peer %d after it has been closed", server.id, peerId)
 	} else {
 		return peer.Call(rpcCall, args, reply)
+	}
+}
+
+func (server *Server) GetServerId() uint64 {
+	return server.id
+}
+
+func (server *Server) SetData(key string, value []byte) {
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	server.db.Set(key, value)
+}
+
+func (server *Server) GetData(key string) ([]byte, bool) {
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	return server.db.Get(key)
+}
+
+func (server *Server) AddToCluster(serverId uint64) {
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	if server.peers[serverId] != nil {
+		server.node.addToCluster(serverId)
 	}
 }

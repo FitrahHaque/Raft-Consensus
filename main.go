@@ -1,18 +1,18 @@
-package main
+// package main
 
-import (
-	"bufio"
-	"encoding/gob"
-	"errors"
-	"fmt"
-	"os"
-	"os/signal"
-	"strconv"
-	"strings"
-	"syscall"
+// import (
+// 	"bufio"
+// 	"encoding/gob"
+// 	"errors"
+// 	"fmt"
+// 	"os"
+// 	"os/signal"
+// 	"strconv"
+// 	"strings"
+// 	"syscall"
 
-	"github.com/FitrahHaque/raft-consensus/raft"
-)
+// 	"github.com/FitrahHaque/raft-consensus/raft"
+// )
 
 //USER COMMANDS                 ARGUMENTS
 //1-> create cluster            number of nodes
