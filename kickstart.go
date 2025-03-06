@@ -38,7 +38,6 @@ func CreateServer(serverId uint64) (*raft.Server, error) {
 	return server, nil
 }
 
-// assumed to be not run simulataneously
 func CollectCommits(server *raft.Server, commitChan chan raft.CommitEntry) error {
 	for commit := range commitChan {
 		//do we need a lock? - logic
@@ -292,6 +291,7 @@ func PrintMenu() {
 	fmt.Println("| Sr |  USER COMMANDS       |      ARGUMENTS                     |")
 	fmt.Println("+----+----------------------+------------------------------------+")
 	fmt.Println("| 1  | create server        |      Id   		                  |")
+	fmt.Println("| 13 | Join Cluster         | 	    leaderId                      |")
 	fmt.Println("| 2  | set data             |      key, value, peerId (optional) |")
 	fmt.Println("| 3  | get data             |      key, peerId (optional)        |")
 	fmt.Println("| 4  | disconnect peer      |      peerId                        |")
@@ -362,9 +362,29 @@ func main() {
 				fmt.Println("invalid number of peers")
 				break
 			}
-			_, err = CreateServer(uint64(peerId))
+			server, err = CreateServer(uint64(peerId))
 			if err == nil {
 				fmt.Printf("SERVER with id %d CREATED !!!\n", peerId)
+			} else {
+				fmt.Printf("err: %v\n", err)
+			}
+		case 13:
+			if len(tokens) < 3 {
+				fmt.Println("leader Id and port not passed")
+				break
+			}
+			leaderId, err := strconv.Atoi(tokens[1])
+			if err != nil {
+				fmt.Println("invalid leader id")
+				break
+			}
+			if err != nil {
+				fmt.Println("invalid leader port")
+				break
+			}
+			err = server.JoinCluster(uint64(leaderId), tokens[2])
+			if err == nil {
+				fmt.Printf("REQUEST TO JOIN THE CLUSTER WITH ID %d SENT !!!\n", peerId)
 			} else {
 				fmt.Printf("err: %v\n", err)
 			}

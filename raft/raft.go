@@ -93,9 +93,19 @@ type JoinClusterArgs struct {
 }
 
 type JoinClusterReply struct {
-	Success     bool
-	LeaderId    uint64
-	CurrentTerm uint64
+	Success  bool
+	LeaderId uint64
+	Term     uint64
+}
+
+type FetchPeerListArgs struct {
+	Term uint64
+}
+
+type FetchPeerListReply struct {
+	Success  bool
+	Term     uint64
+	PeerList Set
 }
 
 func (rn *Node) debug(format string, args ...interface{}) {
@@ -445,12 +455,12 @@ func (node *Node) JoinCluster(args JoinClusterArgs, reply *JoinClusterReply) err
 	if node.state != Leader {
 		reply.Success = false
 		reply.LeaderId = 0 // Or set this to a known leader if maintained.
-		reply.CurrentTerm = node.currentTerm
+		reply.Term = node.currentTerm
 		return fmt.Errorf("node %d is not leader (current term %d)", node.id, node.currentTerm)
 	}
 
 	reply.LeaderId = node.id
-	reply.CurrentTerm = node.currentTerm
+	reply.Term = node.currentTerm
 	if err := node.server.ConnectToPeer(args.ServerId, args.ServerAddr); err != nil {
 		reply.Success = false
 		return fmt.Errorf("failed to connect to peer %d: %v\n", args.ServerId, err)

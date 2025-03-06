@@ -1,6 +1,7 @@
 package raft
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -189,4 +190,47 @@ func (server *Server) AddToCluster(serverId uint64) {
 	if server.peers[serverId] != nil {
 		server.node.addToCluster(serverId)
 	}
+}
+
+func (server *Server) JoinCluster(leaderId uint64, addr string) error {
+	if leaderId < 0 {
+		fmt.Printf("invalid leader id %d\n", leaderId)
+		return errors.New("invalid leader id")
+	}
+	if server.GetServerId() == leaderId {
+		return errors.New("cannot join own cluster")
+	}
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	if server.peers[leaderId] == nil {
+		address, err := net.ResolveTCPAddr("tcp", addr)
+		if err != nil {
+			return err
+		}
+		if err = server.ConnectToPeer(leaderId, address); err != nil {
+			return err
+		}
+	}
+	joinClusterArgs := JoinClusterArgs{ServerId: server.id, ServerAddr: server.listener.Addr()}
+	var joinClusterReply JoinClusterReply
+	if err := server.RPC(leaderId, "RaftNode.JoinCluster", joinClusterArgs, &joinClusterReply); err != nil {
+		return err
+	}
+	if joinClusterReply.Success {
+		server.peerList.Add(joinClusterReply.LeaderId)
+		server.node.becomeFollower(joinClusterReply.Term)
+		fetchPeerListArgs := FetchPeerListArgs{Term: server.node.currentTerm}
+		var fetchPeerListReply FetchPeerListReply
+		if err := server.RPC(joinClusterReply.LeaderId, "RaftNode.FetchPeerList", fetchPeerListArgs, &fetchPeerListReply); err != nil {
+			return err
+		}
+		if fetchPeerListReply.Success {
+			for peerId := range fetchPeerListReply.PeerList.peerSet {
+				if peerId != server.id {
+					server.peerList.Add(peerId)
+				}
+			}
+		}
+	}
+	return nil
 }
