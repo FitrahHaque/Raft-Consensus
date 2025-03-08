@@ -31,7 +31,8 @@ func CreateServer(serverId uint64) (*raft.Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	server.Serve()
+	port := fmt.Sprintf("%d", 8080+serverId)
+	server.Serve(port)
 	go CollectCommits(server, commitChan)
 
 	close(ready)
@@ -40,6 +41,7 @@ func CreateServer(serverId uint64) (*raft.Server, error) {
 
 func CollectCommits(server *raft.Server, commitChan chan raft.CommitEntry) error {
 	for commit := range commitChan {
+		// fmt.Printf("Collect Commits from node %d, entry: %+v\n", server.GetServerId(), commit)
 		//do we need a lock? - logic
 		mu.Lock()
 		// fmt.Printf("Collect Commits from node %d, entry: %+v\n", i, commit)
@@ -57,7 +59,8 @@ func CollectCommits(server *raft.Server, commitChan chan raft.CommitEntry) error
 			server.SetData(v.Key, buf.Bytes()) // Save the data to the database
 		case raft.AddServer:
 			//implement node level addition here - logic
-			server.AddToCluster(server.GetServerId())
+			// fmt.Printf("Add server\n")
+			server.AddAsPeer(v.ServerId)
 		case raft.RemoveServers:
 			break
 			//implement remove server - logic
@@ -294,7 +297,7 @@ func PrintMenu() {
 	fmt.Println("| 10 | stop execution       |      _                             |")
 	fmt.Println("| 11 | add servers          |      [peerIds]                     |")
 	fmt.Println("| 12 | remove servers       |      [peerIds]                     |")
-	fmt.Println("| 13 | join cluster         | 	    leaderId                      |")
+	fmt.Println("| 13 | join cluster         | 	    leaderId, leaderAddress       |")
 	fmt.Println("+----+----------------------+------------------------------------+")
 	fmt.Println("")
 	fmt.Println("+--------------------      USER      ----------------------------+")
@@ -507,7 +510,7 @@ func main() {
 			if isLeader {
 				fmt.Printf("LEADER ID: %d, TERM: %d\n", leaderId, term)
 			} else {
-				fmt.Printf("NODE %d IS NOT A LEADER\n", server.GetServerId())
+				fmt.Printf("NODE %d IS NOT LEADER FOR CURRENT TERM %d\n", server.GetServerId(), server.GetCurrentTerm())
 			}
 		// case 10:
 		// 	err := Stop(cluster)

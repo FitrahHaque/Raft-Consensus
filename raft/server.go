@@ -20,7 +20,7 @@ type Read struct {
 
 type AddServer struct {
 	ServerId uint64
-	Addr     net.Addr
+	Addr     string
 }
 
 type RemoveServers struct {
@@ -28,14 +28,15 @@ type RemoveServers struct {
 }
 
 type Server struct {
-	id        uint64
-	mu        sync.Mutex
-	peerList  Set
-	rpcServer *rpc.Server
-	listener  net.Listener
-	peers     map[uint64]*rpc.Client
-	quit      chan interface{}
-	wg        sync.WaitGroup
+	id          uint64
+	mu          sync.Mutex
+	peerList    Set
+	peerAddress map[uint64]string
+	rpcServer   *rpc.Server
+	listener    net.Listener
+	peers       map[uint64]*rpc.Client
+	quit        chan interface{}
+	wg          sync.WaitGroup
 
 	node       *Node
 	db         *Database
@@ -53,6 +54,7 @@ func CreateServer(
 	server.id = serverId
 	server.peerList = makeSet()
 	server.peers = make(map[uint64]*rpc.Client)
+	server.peerAddress = make(map[uint64]string)
 	server.db = db
 	server.ready = ready
 	server.commitChan = commitChan
@@ -132,16 +134,17 @@ func (server *Server) GetListenerAddr() net.Addr {
 	return server.listener.Addr()
 }
 
-func (server *Server) ConnectToPeer(peerId uint64, addr net.Addr) error {
+func (server *Server) ConnectToPeer(peerId uint64, addr string) error {
 	server.mu.Lock()
 	defer server.mu.Unlock()
-	if server.peers[peerId] == nil {
-		peer, err := rpc.Dial(addr.Network(), addr.String())
-		if err != nil {
-			return err
-		}
-		server.peers[peerId] = peer
+	// fmt.Printf("Before Connecting to peer %d at address %v\n", peerId, addr)
+	peer, err := rpc.Dial("tcp", addr)
+	if err != nil {
+		return err
 	}
+	server.peers[peerId] = peer
+	server.peerAddress[peerId] = addr
+	// fmt.Printf("Connected to peer %d at address %v\n", peerId, addr)
 	return nil
 }
 
@@ -152,6 +155,7 @@ func (server *Server) DisconnectPeer(peerId uint64) error {
 	if peer != nil {
 		err := peer.Close()
 		server.peers[peerId] = nil
+		server.peerAddress[peerId] = ""
 		return err
 	}
 	return nil
@@ -184,16 +188,19 @@ func (server *Server) GetData(key string) ([]byte, bool) {
 	return server.db.Get(key)
 }
 
-func (server *Server) AddToCluster(serverId uint64) {
+func (server *Server) AddAsPeer(serverId uint64) {
+	if serverId == server.id {
+		return
+	}
 	server.mu.Lock()
 	defer server.mu.Unlock()
-	if server.peers[serverId] != nil {
-		server.node.addToCluster(serverId)
+	if server.peers[serverId] != nil && !server.peerList.Exists(serverId) {
+		server.node.addAsPeer(serverId)
 	}
 }
 
 func (server *Server) JoinCluster(leaderId uint64, addr string) error {
-	fmt.Printf("Joining cluster with leader id %d and address: %v\n", leaderId, addr)
+	// fmt.Printf("Joining cluster with leader id %d and address: %v\n", leaderId, addr)
 	if leaderId < 0 {
 		fmt.Printf("invalid leader id %d\n", leaderId)
 		return errors.New("invalid leader id")
@@ -201,40 +208,41 @@ func (server *Server) JoinCluster(leaderId uint64, addr string) error {
 	if server.GetServerId() == leaderId {
 		return errors.New("cannot join own cluster")
 	}
-	server.mu.Lock()
-	defer server.mu.Unlock()
-	if server.peers[leaderId] == nil {
-		fmt.Printf("Connecting to leader %d at address %v\n", leaderId, addr)
-		address, err := net.ResolveTCPAddr("tcp", addr)
-		if err != nil {
-			return err
-		}
-		fmt.Printf("Resolved address %v\n", address)
-		if err = server.ConnectToPeer(leaderId, address); err != nil {
-			return err
-		}
-		fmt.Printf("Connected to leader %d at address %v\n", leaderId, addr)
+
+	// fmt.Printf("Connecting to leader %d at address %v\n", leaderId, addr)
+	if err := server.ConnectToPeer(leaderId, addr); err != nil {
+		fmt.Printf("Error connecting to leader %d at address %v\n", leaderId, addr)
+		return err
 	}
-	joinClusterArgs := JoinClusterArgs{ServerId: server.id, ServerAddr: server.listener.Addr()}
+	// fmt.Printf("Connected to leader %d at address %v\n", leaderId, addr)
+
+	joinClusterArgs := JoinClusterArgs{ServerId: server.id, ServerAddr: server.listener.Addr().String()}
 	var joinClusterReply JoinClusterReply
 	if err := server.RPC(leaderId, "RaftNode.JoinCluster", joinClusterArgs, &joinClusterReply); err != nil {
+		fmt.Printf("Error joining cluster: %v\n", err)
 		return err
 	}
 	if joinClusterReply.Success {
-		fmt.Printf("Joined cluster successfully: %v\n", joinClusterReply)
-		server.peerList.Add(joinClusterReply.LeaderId)
-		server.node.becomeFollower(joinClusterReply.Term)
-		fetchPeerListArgs := FetchPeerListArgs{Term: server.node.currentTerm}
+		// fmt.Printf("Joined cluster successfully: %v\n", joinClusterReply)
+		fetchPeerListArgs := FetchPeerListArgs{Term: joinClusterReply.Term}
 		var fetchPeerListReply FetchPeerListReply
-		if err := server.RPC(joinClusterReply.LeaderId, "RaftNode.FetchPeerList", fetchPeerListArgs, &fetchPeerListReply); err != nil {
+		if err := server.RPC(leaderId, "RaftNode.FetchPeerList", fetchPeerListArgs, &fetchPeerListReply); err != nil {
 			return err
 		}
 		if fetchPeerListReply.Success {
-			for peerId := range fetchPeerListReply.PeerList.peerSet {
+			// fmt.Printf("Fetched peer list successfully: %v\n", fetchPeerListReply.PeerAddress)
+			for peerId, addr := range fetchPeerListReply.PeerAddress {
 				if peerId != server.id {
-					server.peerList.Add(peerId)
+					server.peerAddress[peerId] = addr
 				}
 			}
+			for peerId, addr := range server.peerAddress {
+				// fmt.Printf("Connecting to Peer %d at address %v\n", peerId, addr)
+				server.ConnectToPeer(peerId, addr)
+			}
+			server.node.joinAsPeer(joinClusterReply.LeaderId, fetchPeerListReply.Term, fetchPeerListReply.PeerSet)
+		} else {
+			return fmt.Errorf("failed to fetch peer list from leader %d", leaderId)
 		}
 	} else {
 		fmt.Printf("Failed to join cluster: %v\n", joinClusterReply)
@@ -246,4 +254,20 @@ func (server *Server) CheckLeader() (int, int, bool) {
 	server.mu.Lock()
 	defer server.mu.Unlock()
 	return server.node.Report()
+}
+
+func (server *Server) GetCurrentTerm() uint64 {
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	return server.node.currentTerm
+}
+
+func (server *Server) getPeerAddress() map[uint64]string {
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	peerAddress := make(map[uint64]string, len(server.peerAddress))
+	for k, v := range server.peerAddress {
+		peerAddress[k] = v
+	}
+	return peerAddress
 }
