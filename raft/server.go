@@ -193,6 +193,7 @@ func (server *Server) AddToCluster(serverId uint64) {
 }
 
 func (server *Server) JoinCluster(leaderId uint64, addr string) error {
+	fmt.Printf("Joining cluster with leader id %d and address: %v\n", leaderId, addr)
 	if leaderId < 0 {
 		fmt.Printf("invalid leader id %d\n", leaderId)
 		return errors.New("invalid leader id")
@@ -203,13 +204,16 @@ func (server *Server) JoinCluster(leaderId uint64, addr string) error {
 	server.mu.Lock()
 	defer server.mu.Unlock()
 	if server.peers[leaderId] == nil {
+		fmt.Printf("Connecting to leader %d at address %v\n", leaderId, addr)
 		address, err := net.ResolveTCPAddr("tcp", addr)
 		if err != nil {
 			return err
 		}
+		fmt.Printf("Resolved address %v\n", address)
 		if err = server.ConnectToPeer(leaderId, address); err != nil {
 			return err
 		}
+		fmt.Printf("Connected to leader %d at address %v\n", leaderId, addr)
 	}
 	joinClusterArgs := JoinClusterArgs{ServerId: server.id, ServerAddr: server.listener.Addr()}
 	var joinClusterReply JoinClusterReply
@@ -217,6 +221,7 @@ func (server *Server) JoinCluster(leaderId uint64, addr string) error {
 		return err
 	}
 	if joinClusterReply.Success {
+		fmt.Printf("Joined cluster successfully: %v\n", joinClusterReply)
 		server.peerList.Add(joinClusterReply.LeaderId)
 		server.node.becomeFollower(joinClusterReply.Term)
 		fetchPeerListArgs := FetchPeerListArgs{Term: server.node.currentTerm}
@@ -231,6 +236,14 @@ func (server *Server) JoinCluster(leaderId uint64, addr string) error {
 				}
 			}
 		}
+	} else {
+		fmt.Printf("Failed to join cluster: %v\n", joinClusterReply)
 	}
 	return nil
+}
+
+func (server *Server) CheckLeader() (int, int, bool) {
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	return server.node.Report()
 }

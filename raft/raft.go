@@ -451,7 +451,7 @@ func (node *Node) lastLogIndexAndTerm() (uint64, uint64) {
 func (node *Node) JoinCluster(args JoinClusterArgs, reply *JoinClusterReply) error {
 	node.mu.Lock()
 	defer node.mu.Unlock()
-
+	fmt.Printf("JoinCluster RPC from node %d on node %d\n", args.ServerId, node.id)
 	if node.state != Leader {
 		reply.Success = false
 		reply.LeaderId = 0 // Or set this to a known leader if maintained.

@@ -43,7 +43,7 @@ func CollectCommits(server *raft.Server, commitChan chan raft.CommitEntry) error
 		//do we need a lock? - logic
 		mu.Lock()
 		// fmt.Printf("Collect Commits from node %d, entry: %+v\n", i, commit)
-		logtest(server.GetServerId(), "collectCommits (%d) got %+v", server.GetServerId(), commit)
+		// logtest(server.GetServerId(), "collectCommits (%d) got %+v", server.GetServerId(), commit)
 		switch v := commit.Command.(type) {
 		case raft.Write:
 			var buf bytes.Buffer        // Buffer to hold the data
@@ -266,14 +266,6 @@ func CollectCommits(server *raft.Server, commitChan chan raft.CommitEntry) error
 // 	return nil
 // }
 
-// // check leader of raft cluster
-// func CheckLeader(cluster *raft.ClusterSimulator) (int, int, error) {
-// 	if cluster == nil {
-// 		return -1, -1, errors.New("raft cluster not created")
-// 	}
-// 	return cluster.CheckUniqueLeader()
-// }
-
 // shutdown the server
 func Stop(server *raft.Server) error {
 	if server == nil {
@@ -291,7 +283,6 @@ func PrintMenu() {
 	fmt.Println("| Sr |  USER COMMANDS       |      ARGUMENTS                     |")
 	fmt.Println("+----+----------------------+------------------------------------+")
 	fmt.Println("| 1  | create server        |      Id   		                  |")
-	fmt.Println("| 13 | Join Cluster         | 	    leaderId                      |")
 	fmt.Println("| 2  | set data             |      key, value, peerId (optional) |")
 	fmt.Println("| 3  | get data             |      key, peerId (optional)        |")
 	fmt.Println("| 4  | disconnect peer      |      peerId                        |")
@@ -303,6 +294,7 @@ func PrintMenu() {
 	fmt.Println("| 10 | stop execution       |      _                             |")
 	fmt.Println("| 11 | add servers          |      [peerIds]                     |")
 	fmt.Println("| 12 | remove servers       |      [peerIds]                     |")
+	fmt.Println("| 13 | join cluster         | 	    leaderId                      |")
 	fmt.Println("+----+----------------------+------------------------------------+")
 	fmt.Println("")
 	fmt.Println("+--------------------      USER      ----------------------------+")
@@ -510,13 +502,13 @@ func main() {
 		// 		fmt.Printf("%v\n", err)
 		// 	}
 		// 	cluster = nil
-		// case 9:
-		// 	leaderId, term, err := CheckLeader(cluster)
-		// 	if err == nil {
-		// 		fmt.Printf("LEADER ID: %d, TERM: %d\n", leaderId, term)
-		// 	} else {
-		// 		fmt.Printf("%v\n", err)
-		// 	}
+		case 9:
+			leaderId, term, isLeader := server.CheckLeader()
+			if isLeader {
+				fmt.Printf("LEADER ID: %d, TERM: %d\n", leaderId, term)
+			} else {
+				fmt.Printf("NODE %d IS NOT A LEADER\n", server.GetServerId())
+			}
 		// case 10:
 		// 	err := Stop(cluster)
 		// 	if err == nil {
