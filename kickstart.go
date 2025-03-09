@@ -489,7 +489,7 @@ func main() {
 		// 	cluster = nil
 		case 9:
 			leaderId, term, isLeader := server.CheckLeader()
-			if isLeader {
+			if isLeader || leaderId != -1 {
 				fmt.Printf("LEADER ID: %d, TERM: %d\n", leaderId, term)
 			} else {
 				fmt.Printf("NODE %d IS NOT LEADER FOR CURRENT TERM %d\n", server.GetServerId(), server.GetCurrentTerm())

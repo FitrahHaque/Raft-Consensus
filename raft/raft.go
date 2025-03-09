@@ -6,115 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"math"
 	"math/rand"
 	"os"
-	"sync"
 	"time"
 )
 
 const DEBUG = 0
-
-type NodeState int
-
-const (
-	Follower NodeState = iota
-	Candidate
-	Leader
-	Dead
-)
-
-type CommitEntry struct {
-	Command interface{}
-	Term    uint64
-	Index   uint64
-}
-
-type LogEntry struct {
-	Command interface{}
-	Term    uint64
-}
-
-type Node struct {
-	id             uint64
-	mu             sync.Mutex
-	peerList       Set
-	server         *Server
-	db             *Database
-	commitChan     chan CommitEntry
-	newCommitReady chan struct{}
-	trigger        chan struct{}
-
-	currentTerm uint64
-	votedFor    int64
-	log         []LogEntry
-
-	commitLength       uint64
-	lastApplied        uint64
-	state              NodeState
-	electionResetEvent time.Time
-
-	nextIndex    map[uint64]uint64
-	matchedIndex map[uint64]uint64
-}
-
-type RequestVoteArgs struct {
-	Term         uint64
-	CandidateId  uint64
-	LastLogIndex uint64
-	LastLogTerm  uint64
-}
-
-type RequestVoteReply struct {
-	Term        uint64
-	VoteGranted bool
-}
-
-type AppendEntriesArgs struct {
-	Term         uint64
-	LeaderId     uint64
-	LastLogIndex uint64
-	LastLogTerm  uint64
-	Entries      []LogEntry
-	LeaderCommit uint64
-}
-
-type AppendEntriesReply struct {
-	Term          uint64
-	Success       bool
-	RecoveryIndex uint64
-	RecoveryTerm  uint64
-}
-
-type JoinClusterArgs struct {
-	ServerId   uint64
-	ServerAddr string
-}
-
-type JoinClusterReply struct {
-	Success  bool
-	LeaderId uint64
-	Term     uint64
-}
-
-type LeaveClusterArgs struct {
-	ServerId uint64
-}
-
-type LeaveClusterReply struct {
-	Success bool
-}
-
-type FetchPeerListArgs struct {
-	Term uint64
-}
-
-type FetchPeerListReply struct {
-	Success     bool
-	Term        uint64
-	PeerSet     map[uint64]struct{}
-	PeerAddress map[uint64]string
-}
 
 func (rn *Node) debug(format string, args ...interface{}) {
 	if DEBUG > 0 {
@@ -141,6 +38,7 @@ func CreateNode(
 		trigger:            make(chan struct{}, 1),
 		currentTerm:        0,
 		votedFor:           -1,
+		potentialLeader:    -1,
 		log:                make([]LogEntry, 0),
 		commitLength:       0,
 		lastApplied:        0,
@@ -273,6 +171,7 @@ func (node *Node) startElection() {
 	candidacyTerm := node.currentTerm
 	node.electionResetEvent = time.Now()
 	node.votedFor = int64(node.id)
+	node.potentialLeader = int64(node.id)
 	votesReceived := 1
 	go func() {
 		node.mu.Lock()
@@ -303,7 +202,7 @@ func (node *Node) startElection() {
 					return
 				}
 				if reply.Term > candidacyTerm {
-					node.becomeFollower(reply.Term)
+					node.becomeFollower(reply.Term, -1)
 					return
 				}
 				if reply.Term == candidacyTerm && reply.VoteGranted {
@@ -323,6 +222,7 @@ func (node *Node) startElection() {
 func (node *Node) becomeLeader() {
 	fmt.Printf("Node %d has become Leader for Term %d\n", node.id, node.currentTerm)
 	node.state = Leader
+	node.potentialLeader = int64(node.id)
 	for peer := range node.peerList.peerSet {
 		node.nextIndex[peer] = uint64(len(node.log)) + 1
 		node.matchedIndex[peer] = 0
@@ -410,7 +310,7 @@ func (node *Node) leaderSendAppendEntries() {
 				node.mu.Lock()
 				defer node.mu.Unlock()
 				if reply.Term > leadershipTerm {
-					node.becomeFollower(reply.Term)
+					node.becomeFollower(reply.Term, -1)
 					return
 				}
 				if node.state == Leader && leadershipTerm == reply.Term {
@@ -473,7 +373,7 @@ func (node *Node) joinAsPeer(leaderId uint64, term uint64, peerSet map[uint64]st
 	node.mu.Lock()
 	defer node.mu.Unlock()
 	node.peerList.Add(leaderId)
-	node.becomeFollower(term)
+	node.becomeFollower(term, int64(leaderId))
 	for peerId := range peerSet {
 		if peerId != node.id {
 			fmt.Printf("[%d] Connected to peer %d\n", node.id, peerId)
@@ -482,169 +382,13 @@ func (node *Node) joinAsPeer(leaderId uint64, term uint64, peerSet map[uint64]st
 	}
 }
 
-func (node *Node) JoinCluster(args JoinClusterArgs, reply *JoinClusterReply) error {
-	node.mu.Lock()
-	// fmt.Printf("JoinCluster RPC from node %d on node %d\n", args.ServerId, node.id)
-	if node.state != Leader {
-		reply.Success = false
-		reply.LeaderId = 0 // Or set this to a known leader if maintained.
-		reply.Term = node.currentTerm
-		node.mu.Unlock()
-		return fmt.Errorf("node %d is not leader (current term %d)", node.id, node.currentTerm)
-	}
-	// if node.peerList.Exists(args.ServerId) {
-	// 	reply.Success = false
-	// 	reply.LeaderId = node.id
-	// 	reply.Term = node.currentTerm
-	// 	return fmt.Errorf("server %d already exists in the cluster", args.ServerId)
-	// }
-	reply.LeaderId = node.id
-	reply.Term = node.currentTerm
-	if err := node.server.ConnectToPeer(args.ServerId, args.ServerAddr); err != nil {
-		reply.Success = false
-		node.mu.Unlock()
-		return fmt.Errorf("failed to connect to peer %d: %v\n", args.ServerId, err)
-	}
-	reply.Success = true
-	cmd := AddServer{ServerId: args.ServerId, Addr: args.ServerAddr}
-	node.mu.Unlock()
-
-	go node.newLogEntry(cmd)
-
-	return nil
-}
-
-func (node *Node) LeaveCluster(args LeaveClusterArgs, reply *LeaveClusterReply) error {
-	node.mu.Lock()
-
-	if node.state != Leader {
-		reply.Success = false
-		node.mu.Unlock()
-		return nil
-	}
-	reply.Success = true
-	if !node.peerList.Exists(args.ServerId) {
-		node.mu.Unlock()
-		return nil
-	}
-	cmd := RemoveServer{ServerId: args.ServerId}
-	node.mu.Unlock()
-
-	go node.newLogEntry(cmd)
-
-	return nil
-}
-
-func (node *Node) FetchPeerList(args FetchPeerListArgs, reply *FetchPeerListReply) error {
-	node.mu.Lock()
-	defer node.mu.Unlock()
-
-	if node.currentTerm == args.Term && node.state == Leader {
-		reply.Success = true
-		reply.Term = node.currentTerm
-		peerSet := make(map[uint64]struct{}, len(node.peerList.peerSet))
-		for k, v := range node.peerList.peerSet {
-			peerSet[k] = v
-		}
-		reply.PeerSet = peerSet
-		reply.PeerAddress = node.server.getPeerAddress()
-	} else {
-		reply.Success = false
-		reply.Term = node.currentTerm
-	}
-	return nil
-}
-
-func (node *Node) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) error {
-	node.mu.Lock()
-	defer node.mu.Unlock()
-
-	if node.state == Dead || !node.peerList.Exists(args.LeaderId) {
-		return nil
-	}
-	if args.Term > node.currentTerm {
-		node.becomeFollower(args.Term)
-	}
-	reply.Success = false
-	if args.Term == node.currentTerm {
-		if node.state != Follower {
-			node.becomeFollower(args.Term)
-		}
-		node.electionResetEvent = time.Now()
-		if args.LastLogIndex == 0 ||
-			args.LastLogIndex <= uint64(len(node.log)) && args.LastLogTerm == node.log[args.LastLogIndex-1].Term {
-			reply.Success = true
-			//check node.commitLength?
-			node.log = append(node.log[:args.LastLogIndex], args.Entries...)
-			for _, entry := range args.Entries {
-				cmd := entry.Command
-				switch v := cmd.(type) {
-				case AddServer:
-					if node.id != v.ServerId {
-						node.server.ConnectToPeer(v.ServerId, v.Addr)
-					}
-				case RemoveServer:
-					if node.id != v.ServerId && node.peerList.Exists(v.ServerId) {
-						node.peerList.Remove(v.ServerId)
-					}
-				}
-			}
-			if args.LeaderCommit > node.commitLength {
-				node.commitLength = uint64(math.Min(float64(args.LeaderCommit), float64((len(node.log)))))
-				node.newCommitReady <- struct{}{}
-			}
-		} else {
-			if args.LastLogIndex > uint64(len(node.log)) {
-				reply.RecoveryIndex = uint64(len(node.log)) + 1
-				reply.RecoveryTerm = 0
-			} else {
-				reply.RecoveryTerm = node.log[args.LastLogIndex-1].Term
-				reply.RecoveryIndex = 1
-				for i := args.LastLogIndex - 1; i > 0; i-- {
-					if node.log[i-1].Term != reply.RecoveryTerm {
-						reply.RecoveryIndex = i + 1
-						break
-					}
-				}
-			}
-		}
-	}
-	reply.Term = node.currentTerm
-	node.persistToStorage()
-	return nil
-}
-
-func (node *Node) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) error {
-	node.mu.Lock()
-	defer node.mu.Unlock()
-
-	if node.state == Dead || !node.peerList.Exists(args.CandidateId) {
-		return nil
-	}
-	lastLogIndex, lastLogTerm := node.lastLogIndexAndTerm()
-	if args.Term > node.currentTerm {
-		node.becomeFollower(args.Term)
-	}
-
-	if args.Term == node.currentTerm &&
-		(node.votedFor == -1 || node.votedFor == int64(args.CandidateId)) &&
-		(args.LastLogTerm > lastLogTerm || (args.LastLogTerm == lastLogTerm && args.LastLogIndex >= lastLogIndex)) {
-		reply.VoteGranted = true
-		node.votedFor = int64(args.CandidateId)
-		node.electionResetEvent = time.Now()
-	} else {
-		reply.VoteGranted = false
-	}
-	reply.Term = node.currentTerm
-	node.persistToStorage()
-	return nil
-}
-
-func (node *Node) becomeFollower(newTerm uint64) {
+func (node *Node) becomeFollower(newTerm uint64, leaderId int64) {
 	node.state = Follower
 	node.currentTerm = newTerm
 	node.votedFor = -1
+	node.potentialLeader = leaderId
 	node.electionResetEvent = time.Now()
+
 	go node.runElectionTimer()
 }
 
@@ -770,15 +514,16 @@ func (node *Node) Stop() {
 	defer node.mu.Unlock()
 
 	node.state = Dead
+	node.potentialLeader = -1
 	close(node.newCommitReady)
 }
 
-func (node *Node) Report() (id int, term int, isLeader bool) {
+func (node *Node) Report() (id int64, term uint64, isLeader bool) {
 	node.mu.Lock()
 	defer node.mu.Unlock()
 
 	isLeader = node.state == Leader
-	return int(node.id), int(node.currentTerm), isLeader
+	return node.potentialLeader, node.currentTerm, isLeader
 }
 
 func (state NodeState) String() string {

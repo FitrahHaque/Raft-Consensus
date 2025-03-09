@@ -7,25 +7,8 @@ import (
 	"net"
 	"net/rpc"
 	"sync"
+	"time"
 )
-
-type Write struct {
-	Key string
-	Val int
-}
-
-type Read struct {
-	Key string
-}
-
-type AddServer struct {
-	ServerId uint64
-	Addr     string
-}
-
-type RemoveServer struct {
-	ServerId uint64
-}
 
 type Server struct {
 	id          uint64
@@ -110,11 +93,17 @@ func (server *Server) Serve(port ...string) {
 
 func (server *Server) DisconnectAll() {
 	server.mu.Lock()
-	defer server.mu.Unlock()
+	var wg sync.WaitGroup
 	for id := range server.peers {
 		server.node.removePeer(id)
-		go server.DisconnectPeer(id)
+		wg.Add(1)
+		go func(peerId uint64) {
+			defer wg.Done()
+			server.DisconnectPeer(peerId)
+		}(id)
 	}
+	server.mu.Unlock()
+	wg.Wait()
 }
 
 func (server *Server) RequestToLeaveCluster() {
@@ -231,53 +220,49 @@ func (server *Server) RemoveFromCluster(serverId uint64) {
 }
 
 func (server *Server) RequestToJoinCluster(leaderId uint64, addr string) error {
-	// fmt.Printf("Joining cluster with leader id %d and address: %v\n", leaderId, addr)
-	if leaderId < 0 {
-		fmt.Printf("invalid leader id %d\n", leaderId)
-		return errors.New("invalid leader id")
-	}
 	if server.GetServerId() == leaderId {
 		return errors.New("cannot join own cluster")
 	}
-
-	// fmt.Printf("Connecting to leader %d at address %v\n", leaderId, addr)
-	if err := server.ConnectToPeer(leaderId, addr); err != nil {
-		fmt.Printf("Error connecting to leader %d at address %v\n", leaderId, addr)
-		return err
-	}
-	// fmt.Printf("Connected to leader %d at address %v\n", leaderId, addr)
-
 	joinClusterArgs := JoinClusterArgs{ServerId: server.id, ServerAddr: server.listener.Addr().String()}
 	var joinClusterReply JoinClusterReply
-	if err := server.RPC(leaderId, "RaftNode.JoinCluster", joinClusterArgs, &joinClusterReply); err != nil {
-		fmt.Printf("Error joining cluster: %v\n", err)
-		return err
-	}
-	if joinClusterReply.Success {
-		// fmt.Printf("Joined cluster successfully: %v\n", joinClusterReply)
-		fetchPeerListArgs := FetchPeerListArgs{Term: joinClusterReply.Term}
-		var fetchPeerListReply FetchPeerListReply
-		if err := server.RPC(leaderId, "RaftNode.FetchPeerList", fetchPeerListArgs, &fetchPeerListReply); err != nil {
+	for i := 0; i < 5; i++ {
+		if err := server.ConnectToPeer(leaderId, addr); err != nil {
+			fmt.Printf("Error connecting to leader %d at address %v\n", leaderId, addr)
 			return err
 		}
-		if fetchPeerListReply.Success {
-			// fmt.Printf("Fetched peer list successfully: %v\n", fetchPeerListReply.PeerAddress)
-			for peerId, addr := range fetchPeerListReply.PeerAddress {
-				if peerId != server.id {
-					server.ConnectToPeer(peerId, addr)
-				}
-			}
-			server.node.joinAsPeer(joinClusterReply.LeaderId, fetchPeerListReply.Term, fetchPeerListReply.PeerSet)
-		} else {
-			return fmt.Errorf("failed to fetch peer list from leader %d", leaderId)
+		if err := server.RPC(leaderId, "RaftNode.JoinCluster", joinClusterArgs, &joinClusterReply); err != nil {
+			fmt.Printf("Error joining cluster: %v\n", err)
+			return err
 		}
-	} else {
-		fmt.Printf("Failed to join cluster: %v\n", joinClusterReply)
+		if joinClusterReply.Success {
+			fetchPeerListArgs := FetchPeerListArgs{Term: joinClusterReply.Term}
+			var fetchPeerListReply FetchPeerListReply
+			if err := server.RPC(leaderId, "RaftNode.FetchPeerList", fetchPeerListArgs, &fetchPeerListReply); err != nil {
+				fmt.Printf("Error fetching peer list from leader %d\n", leaderId)
+				return err
+			}
+			if fetchPeerListReply.Success {
+				for peerId, addr := range fetchPeerListReply.PeerAddress {
+					if peerId != server.id {
+						server.ConnectToPeer(peerId, addr)
+					}
+				}
+				server.node.joinAsPeer(uint64(joinClusterReply.LeaderId), fetchPeerListReply.Term, fetchPeerListReply.PeerSet)
+				return nil
+			} else if fetchPeerListReply.LeaderId != -1 {
+				leaderId = uint64(fetchPeerListReply.LeaderId)
+				addr = fetchPeerListReply.LeaderAddr
+			}
+		} else if joinClusterReply.LeaderId != -1 {
+			leaderId = uint64(joinClusterReply.LeaderId)
+			addr = joinClusterReply.LeaderAddr
+		}
+		time.Sleep(1000)
 	}
-	return nil
+	return fmt.Errorf("failed to join cluster: %v\n", joinClusterReply)
 }
 
-func (server *Server) CheckLeader() (int, int, bool) {
+func (server *Server) CheckLeader() (int64, uint64, bool) {
 	server.mu.Lock()
 	defer server.mu.Unlock()
 	return server.node.Report()
@@ -289,7 +274,7 @@ func (server *Server) GetCurrentTerm() uint64 {
 	return server.node.currentTerm
 }
 
-func (server *Server) getPeerAddress() map[uint64]string {
+func (server *Server) getAllPeerAddresses() map[uint64]string {
 	server.mu.Lock()
 	defer server.mu.Unlock()
 	peerAddress := make(map[uint64]string, len(server.peerAddress))
@@ -297,4 +282,10 @@ func (server *Server) getPeerAddress() map[uint64]string {
 		peerAddress[k] = v
 	}
 	return peerAddress
+}
+
+func (server *Server) GetPeerAddress(peerId uint64) string {
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	return server.peerAddress[peerId]
 }
