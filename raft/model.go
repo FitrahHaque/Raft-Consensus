@@ -130,3 +130,19 @@ type FetchPeerListReply struct {
 	PeerSet     map[uint64]struct{}
 	PeerAddress map[uint64]string
 }
+
+type SendDataArgs struct {
+	Cmd  interface{}
+	Term uint64
+}
+
+type SendDataReply struct {
+	Success  bool
+	Term     uint64
+	LeaderId int64
+	Result   struct {
+		Success bool
+		Value   interface{}
+		Error   error
+	}
+}

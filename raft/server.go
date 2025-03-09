@@ -109,7 +109,7 @@ func (server *Server) DisconnectAll() {
 func (server *Server) RequestToLeaveCluster() {
 	args := LeaveClusterArgs{ServerId: server.id}
 	var reply LeaveClusterReply
-	if err := server.RPC(0, "RaftNode.LeaveCluster", args, &reply); err != nil {
+	if err := server.RPC(0, "RaftNode.LeaveCluster", args, &reply); err != nil { //need to fix the leader (easy)
 		log.Printf("[%d] Error leaving cluster: %v\n", server.id, err)
 	}
 	if reply.Success {
@@ -201,7 +201,7 @@ func (server *Server) AddToCluster(serverId uint64) {
 	}
 	server.mu.Lock()
 	defer server.mu.Unlock()
-	if server.peers[serverId] != nil && !server.peerList.Exists(serverId) {
+	if server.peers[serverId] != nil {
 		server.node.addPeer(serverId)
 	}
 }
@@ -247,7 +247,7 @@ func (server *Server) RequestToJoinCluster(leaderId uint64, addr string) error {
 						server.ConnectToPeer(peerId, addr)
 					}
 				}
-				server.node.joinAsPeer(uint64(joinClusterReply.LeaderId), fetchPeerListReply.Term, fetchPeerListReply.PeerSet)
+				server.node.joinAsPeer(uint64(leaderId), fetchPeerListReply.Term, fetchPeerListReply.PeerSet)
 				return nil
 			} else if fetchPeerListReply.LeaderId != -1 {
 				leaderId = uint64(fetchPeerListReply.LeaderId)
@@ -288,4 +288,8 @@ func (server *Server) GetPeerAddress(peerId uint64) string {
 	server.mu.Lock()
 	defer server.mu.Unlock()
 	return server.peerAddress[peerId]
+}
+
+func (server *Server) SubmitToServer(cmd interface{}) (bool, interface{}, error) {
+	return server.node.newLogEntry(cmd)
 }

@@ -104,6 +104,9 @@ func (node *Node) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesRepl
 			args.LastLogIndex <= uint64(len(node.log)) && args.LastLogTerm == node.log[args.LastLogIndex-1].Term {
 			reply.Success = true
 			//check node.commitLength?
+			// if len(args.Entries) > 0 {
+			// 	fmt.Printf("New data available to append\n")
+			// }
 			node.log = append(node.log[:args.LastLogIndex], args.Entries...)
 			for _, entry := range args.Entries {
 				cmd := entry.Command
@@ -118,6 +121,9 @@ func (node *Node) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesRepl
 					}
 				}
 			}
+			// if len(args.Entries) > 0 {
+			// 	fmt.Printf("New Entries: %v\n", args.Entries)
+			// }
 			if args.LeaderCommit > node.commitLength {
 				node.commitLength = uint64(math.Min(float64(args.LeaderCommit), float64((len(node.log)))))
 				node.newCommitReady <- struct{}{}
@@ -140,6 +146,24 @@ func (node *Node) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesRepl
 	}
 	reply.Term = node.currentTerm
 	node.persistToStorage()
+	return nil
+}
+
+func (node *Node) SendData(args SendDataArgs, reply *SendDataReply) error {
+	node.mu.Lock()
+	// fmt.Println("Send Data RPC equest arrived")
+	if node.state != Leader || node.currentTerm > args.Term {
+		reply.Success = false
+		reply.Term = node.currentTerm
+		reply.LeaderId = node.potentialLeader
+		node.mu.Unlock()
+		return nil
+	}
+	reply.Success = true
+	reply.Term = node.currentTerm
+	reply.LeaderId = int64(node.id)
+	node.mu.Unlock()
+	reply.Result.Success, reply.Result.Value, reply.Result.Error = node.newLogEntry(args.Cmd)
 	return nil
 }
 

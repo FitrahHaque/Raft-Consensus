@@ -55,7 +55,7 @@ func CollectCommits(server *raft.Server, commitChan chan raft.CommitEntry) error
 				mu.Unlock()
 				return err
 			}
-			// fmt.Printf("Set key: %s, value: %d\n", v.Key, v.Val)
+			fmt.Printf("Set key: %s, value: %d\n", v.Key, v.Val)
 			server.SetData(v.Key, buf.Bytes()) // Save the data to the database
 		case raft.AddServer:
 			// fmt.Printf("Add server\n")
@@ -77,63 +77,30 @@ func CollectCommits(server *raft.Server, commitChan chan raft.CommitEntry) error
 
 // write integer value to a string key in the database
 // OPTIONAL to pass a particular server id to send command to
-// func SetData(cluster *raft.ClusterSimulator, key string, val int, serverParam ...int) error {
-// 	if cluster == nil {
-// 		return errors.New("raft cluster not created")
-// 	}
-// 	commandToServer := raft.Write{Key: key, Val: val}
-// 	serverId := 0
-// 	if len(serverParam) >= 1 {
-// 		serverId = serverParam[0]
-// 	} else {
-// 		var err error
-// 		serverId, _, err = cluster.CheckUniqueLeader()
-// 		if err != nil {
-// 			return err
-// 		}
-// 	}
-// 	if serverId < 0 {
-// 		return errors.New("unable to submit command to any server")
-// 	}
-// 	success := false
-// 	if success, _, _ = cluster.SubmitToServer(serverId, commandToServer); success {
-// 		return nil
-// 	} else {
-// 		return errors.New("command could not be submitted, try different server(leader)")
-// 	}
-// }
+func SetData(server *raft.Server, key string, val int) error {
+	cmd := raft.Write{Key: key, Val: val}
+	if success, _, _ := server.SubmitToServer(cmd); success {
+		return nil
+	} else {
+		return errors.New("command could not be submitted, try different server(leader)")
+	}
+}
 
 // read integer value of a string key from the database
 // OPTIONAL to pass a particular server id to send command to
-// func GetData(cluster *raft.ClusterSimulator, key string, serverParam ...int) (int, error) {
-// 	if cluster == nil {
-// 		return 0, errors.New("raft cluster not created")
-// 	}
-// 	commandToServer := raft.Read{Key: key}
-// 	serverId := 0
-// 	if len(serverParam) >= 1 {
-// 		serverId = serverParam[0]
-// 	} else {
-// 		var err error
-// 		serverId, _, err = cluster.CheckUniqueLeader()
-// 		if err != nil {
-// 			return 0, err
-// 		}
-// 	}
-// 	if serverId < 0 {
-// 		return 0, errors.New("unable to submit command to any server")
-// 	}
-// 	if success, reply, err := cluster.SubmitToServer(serverId, commandToServer); success {
-// 		if err != nil {
-// 			return -1, err
-// 		} else {
-// 			value, _ := reply.(int)
-// 			return value, nil
-// 		}
-// 	} else {
-// 		return 0, errors.New("command could not be submitted, try different server(leader)")
-// 	}
-// }
+func GetData(server *raft.Server, key string) (int, error) {
+	cmd := raft.Read{Key: key}
+	if success, reply, err := server.SubmitToServer(cmd); success {
+		if err != nil {
+			return -1, err
+		} else {
+			value, _ := reply.(int)
+			return value, nil
+		}
+	} else {
+		return 0, errors.New("command could not be submitted, try different server")
+	}
+}
 
 // // add new server to the raft cluster
 // func AddServers(cluster *raft.ClusterSimulator, serverIds []int) error {
@@ -270,8 +237,8 @@ func PrintMenu() {
 	fmt.Println("| Sr |  USER COMMANDS       |      ARGUMENTS                     |")
 	fmt.Println("+----+----------------------+------------------------------------+")
 	fmt.Println("| 1  | create server        |      Id   		                  |")
-	fmt.Println("| 2  | set data             |      key, value, peerId (optional) |")
-	fmt.Println("| 3  | get data             |      key, peerId (optional)        |")
+	fmt.Println("| 2  | set data             |      key, value     				  |")
+	fmt.Println("| 3  | get data             |      key                           |")
 	fmt.Println("| 4  | disconnect peer      |      peerId                        |")
 	fmt.Println("| 5  | reconnect peer       |      peerId                        |")
 	fmt.Println("| 6  | crash peer           |      peerId                        |")
@@ -365,55 +332,33 @@ func main() {
 			if err != nil {
 				fmt.Printf("err: %v\n", err)
 			}
-		// case 2:
-		// 	if len(tokens) < 3 {
-		// 		fmt.Println("key or value not passed")
-		// 		break
-		// 	}
-		// 	val, err := strconv.Atoi(tokens[2])
-		// 	if err != nil {
-		// 		fmt.Println("invalid value passed")
-		// 		break
-		// 	}
-		// 	serverId := 0
-		// 	if len(tokens) >= 4 {
-		// 		serverId, err = strconv.Atoi(tokens[3])
-		// 		if err != nil /*|| serverId >= peers*/ {
-		// 			fmt.Printf("invalid server id %d passed\n", serverId)
-		// 			break
-		// 		}
-		// 		err = SetData(cluster, tokens[1], val, serverId)
-		// 	} else {
-		// 		err = SetData(cluster, tokens[1], val)
-		// 	}
-		// 	if err == nil {
-		// 		fmt.Printf("WRITE TO KEY %s WITH VALUE %d SUCCESSFUL\n", tokens[1], val)
-		// 	} else {
-		// 		fmt.Printf("%v\n", err)
-		// 	}
-		// case 3:
-		// 	if len(tokens) < 2 {
-		// 		fmt.Println("key not passed")
-		// 		break
-		// 	}
-		// 	var err error
-		// 	var val int
-		// 	serverId := 0
-		// 	if len(tokens) >= 3 {
-		// 		serverId, err = strconv.Atoi(tokens[2])
-		// 		if err != nil /*|| serverId >= peers*/ {
-		// 			fmt.Printf("invalid server id %d passed\n", serverId)
-		// 			break
-		// 		}
-		// 		val, err = GetData(cluster, tokens[1], serverId)
-		// 	} else {
-		// 		val, err = GetData(cluster, tokens[1])
-		// 	}
-		// 	if err == nil {
-		// 		fmt.Printf("READ KEY %s VALUE %d\n", tokens[1], val)
-		// 	} else {
-		// 		fmt.Printf("%v\n", err)
-		// 	}
+		case 2:
+			if len(tokens) < 3 {
+				fmt.Println("key or value not passed")
+				break
+			}
+			val, err := strconv.Atoi(tokens[2])
+			if err != nil {
+				fmt.Println("invalid value passed")
+				break
+			}
+			err = SetData(server, tokens[1], val)
+			if err == nil {
+				fmt.Printf("WRITE TO KEY %s WITH VALUE %d SUCCESSFUL\n", tokens[1], val)
+			} else {
+				fmt.Printf("%v\n", err)
+			}
+		case 3:
+			if len(tokens) < 2 {
+				fmt.Println("key not passed")
+				break
+			}
+			val, err := GetData(server, tokens[1])
+			if err == nil {
+				fmt.Printf("READ KEY %s VALUE %d\n", tokens[1], val)
+			} else {
+				fmt.Printf("%v\n", err)
+			}
 		// case 4:
 		// 	if len(tokens) < 2 {
 		// 		fmt.Println("peer id not passed")

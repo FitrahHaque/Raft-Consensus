@@ -294,6 +294,7 @@ func (node *Node) leaderSendAppendEntries() {
 				lastLogTermSaved = node.log[lastLogIndexSaved-1].Term
 			}
 			entries := node.log[nextIndexSaved-1:]
+			// fmt.Printf("Entries Sent: %v\n", entries)
 			// fmt.Printf("nextIndexSaved is %d and lastLogIndexSaved is %d for peer %d from node %d on term %d\n", nextIndexSaved, uint64(lastLogIndexSaved), peer, node.id, node.currentTerm)
 			// fmt.Printf("[LeaderSendAppendEntries peer %d] entries size: %d\n", peer, len(entries))
 			args := AppendEntriesArgs{
@@ -373,6 +374,7 @@ func (node *Node) joinAsPeer(leaderId uint64, term uint64, peerSet map[uint64]st
 	node.mu.Lock()
 	defer node.mu.Unlock()
 	node.peerList.Add(leaderId)
+	fmt.Printf("[%d] Connected to leader %d\n", node.id, leaderId)
 	node.becomeFollower(term, int64(leaderId))
 	for peerId := range peerSet {
 		if peerId != node.id {
@@ -483,6 +485,7 @@ func (node *Node) newLogEntry(command interface{}) (bool, interface{}, error) {
 			node.trigger <- struct{}{}
 			return true, nil, nil
 		default:
+			// fmt.Printf("Data append on leader: %d\n", node.id)
 			node.log = append(node.log, LogEntry{
 				Command: command,
 				Term:    node.currentTerm,
@@ -502,6 +505,39 @@ func (node *Node) newLogEntry(command interface{}) (bool, interface{}, error) {
 			// fmt.Printf("key, value = %v, %v\n", key, value)
 			node.mu.Unlock()
 			return true, value, readErr
+		case Write:
+			if node.potentialLeader != -1 && node.potentialLeader != int64(node.id) {
+				leaderId := node.potentialLeader
+				node.mu.Unlock()
+				for leaderId != -1 || leaderId != int64(node.id) {
+					node.mu.Lock()
+					fmt.Printf("Send Data to Leader %d\n", leaderId)
+					args := SendDataArgs{Cmd: command, Term: node.currentTerm}
+					var reply SendDataReply
+					if err := node.server.RPC(uint64(leaderId), "RaftNode.SendData", args, &reply); err != nil {
+						// fmt.Printf("RPC Call failed\n")
+						node.mu.Unlock()
+
+						return false, nil, err
+					}
+					if reply.Success {
+						// fmt.Printf("Send data successful with leader %d\n", leaderId)
+						node.mu.Unlock()
+						return reply.Result.Success, reply.Result.Value, reply.Result.Error
+					}
+					if reply.Term > node.currentTerm {
+						node.mu.Unlock()
+						return false, nil, errors.New("node not up to date to the most recent term")
+					}
+					if leaderId == reply.LeaderId {
+						node.mu.Unlock()
+						return false, nil, errors.New("Could not find the leader")
+					}
+					leaderId = reply.LeaderId
+					node.mu.Unlock()
+				}
+				return false, nil, errors.New("Write operation failed!")
+			}
 		}
 	}
 
