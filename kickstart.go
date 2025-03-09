@@ -58,33 +58,13 @@ func CollectCommits(server *raft.Server, commitChan chan raft.CommitEntry) error
 			// fmt.Printf("Set key: %s, value: %d\n", v.Key, v.Val)
 			server.SetData(v.Key, buf.Bytes()) // Save the data to the database
 		case raft.AddServer:
-			//implement node level addition here - logic
 			// fmt.Printf("Add server\n")
-			server.AddAsPeer(v.ServerId)
-		case raft.RemoveServers:
-			break
-			//implement remove server - logic
-			// serverIds := v.ServerIds
-			// for i := uint64(0); i < uint64(len(serverIds)); i++ {
-			// 	if nc.activeServers.Exists(uint64(serverIds[i])) {
-			// 		// Cluster Modifications
-			// 		nc.DisconnectPeer(uint64(serverIds[i]))
-			// 		nc.isAlive[uint64(serverIds[i])] = false
-			// 		nc.raftCluster[uint64(serverIds[i])].Stop()
-			// 		nc.commits[uint64(serverIds[i])] = nc.commits[uint64(serverIds[i])][:0]
-			// 		close(nc.commitChans[uint64(serverIds[i])])
-
-			// 		// Removing traces of this server
-			// 		delete(nc.raftCluster, uint64(serverIds[i]))
-			// 		delete(nc.dbCluster, uint64(serverIds[i]))
-			// 		delete(nc.commitChans, uint64(serverIds[i]))
-			// 		delete(nc.commits, uint64(serverIds[i]))
-			// 		delete(nc.isAlive, uint64(serverIds[i]))
-			// 		delete(nc.isConnected, uint64(serverIds[i]))
-
-			// 		nc.activeServers.Remove(uint64(serverIds[i]))
-			// 	}
-			// }
+			server.AddToCluster(v.ServerId)
+		case raft.RemoveServer:
+			if server.GetServerId() != v.ServerId {
+				server.RemoveFromCluster(v.ServerId)
+				// fmt.Printf("[%d] Server %d removed from cluster\n", server.GetServerId(), v.ServerId)
+			}
 		default:
 			// fmt.Printf("default\n")
 			break
@@ -269,6 +249,10 @@ func CollectCommits(server *raft.Server, commitChan chan raft.CommitEntry) error
 // 	return nil
 // }
 
+func RemoveServer(server *raft.Server) {
+	server.RequestToLeaveCluster()
+}
+
 // shutdown the server
 func Stop(server *raft.Server) error {
 	if server == nil {
@@ -295,8 +279,8 @@ func PrintMenu() {
 	fmt.Println("| 8  | shutdown             |      _                             |")
 	fmt.Println("| 9  | check leader         |      _                             |")
 	fmt.Println("| 10 | stop execution       |      _                             |")
-	fmt.Println("| 11 | add servers          |      [peerIds]                     |")
-	fmt.Println("| 12 | remove servers       |      [peerIds]                     |")
+	fmt.Println("| 11 | add servers (x)      |      [peerIds]                     |")
+	fmt.Println("| 12 | remove server        |                                    |")
 	fmt.Println("| 13 | join cluster         | 	    leaderId, leaderAddress       |")
 	fmt.Println("+----+----------------------+------------------------------------+")
 	fmt.Println("")
@@ -326,7 +310,7 @@ func main() {
 	gob.Register(raft.Write{})
 	gob.Register(raft.Read{})
 	gob.Register(raft.AddServer{})
-	gob.Register(raft.RemoveServers{})
+	gob.Register(raft.RemoveServer{})
 
 	fmt.Println("\n\n=============================================================")
 	fmt.Println("=    Ensure that you set [DEBUG=0] in [raft/raft.go] file   =")
@@ -377,10 +361,8 @@ func main() {
 				fmt.Println("invalid leader port")
 				break
 			}
-			err = server.JoinCluster(uint64(leaderId), tokens[2])
-			if err == nil {
-				fmt.Printf("REQUEST TO JOIN THE CLUSTER WITH ID %d SENT !!!\n", peerId)
-			} else {
+			err = server.RequestToJoinCluster(uint64(leaderId), tokens[2])
+			if err != nil {
 				fmt.Printf("err: %v\n", err)
 			}
 		// case 2:
@@ -544,29 +526,9 @@ func main() {
 		// 	} else {
 		// 		fmt.Printf("%v\n", err)
 		// 	}
-		// case 12:
-		// 	if len(tokens) < 2 {
-		// 		fmt.Println("peer ids not passed")
-		// 		break
-		// 	}
-		// 	serverIds := make([]int, len(tokens)-1)
-		// 	var val int
-		// 	var err error
-		// 	for i := 1; i < len(tokens); i++ {
-		// 		val, err = strconv.Atoi(tokens[i])
-		// 		if err != nil {
-		// 			fmt.Println("Invalid server ID")
-		// 			break
-		// 		}
-		// 		serverIds[i-1] = val
-		// 	}
-
-		// 	err = RemoveServers(cluster, serverIds)
-		// 	if err == nil {
-		// 		fmt.Printf("Removed ServerIDs: %v from cluster", serverIds)
-		// 	} else {
-		// 		fmt.Printf("%v\n", err)
-		// 	}
+		case 12:
+			RemoveServer(server)
+			fmt.Printf("Server %d removed from cluster\n", server.GetServerId())
 		default:
 			fmt.Println("Invalid Command")
 		}

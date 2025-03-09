@@ -23,8 +23,8 @@ type AddServer struct {
 	Addr     string
 }
 
-type RemoveServers struct {
-	ServerIds []int
+type RemoveServer struct {
+	ServerId uint64
 }
 
 type Server struct {
@@ -112,11 +112,26 @@ func (server *Server) DisconnectAll() {
 	server.mu.Lock()
 	defer server.mu.Unlock()
 	for id := range server.peers {
-		if server.peers[id] != nil {
-			server.peers[id].Close()
-			server.peers[id] = nil
-		}
+		server.node.removePeer(id)
+		go server.DisconnectPeer(id)
 	}
+}
+
+func (server *Server) RequestToLeaveCluster() {
+	args := LeaveClusterArgs{ServerId: server.id}
+	var reply LeaveClusterReply
+	if err := server.RPC(0, "RaftNode.LeaveCluster", args, &reply); err != nil {
+		log.Printf("[%d] Error leaving cluster: %v\n", server.id, err)
+	}
+	if reply.Success {
+		server.DisconnectAll()
+	}
+}
+
+func (server *Server) Shutdown() {
+	server.RequestToLeaveCluster()
+	server.Stop()
+	close(server.commitChan)
 }
 
 func (server *Server) Stop() {
@@ -125,7 +140,7 @@ func (server *Server) Stop() {
 	server.listener.Close()
 	log.Printf("[%d] Waiting for existing connections to close\n", server.id)
 	server.wg.Wait()
-	log.Printf("[%d] All conections closed. Stopping server\n", server.id)
+	log.Printf("[%d] All connections closed. Stopping server\n", server.id)
 }
 
 func (server *Server) GetListenerAddr() net.Addr {
@@ -149,13 +164,16 @@ func (server *Server) ConnectToPeer(peerId uint64, addr string) error {
 }
 
 func (server *Server) DisconnectPeer(peerId uint64) error {
+	// fmt.Printf("Before Disconnecting peer %d\n", peerId)
 	server.mu.Lock()
 	defer server.mu.Unlock()
+	// fmt.Printf("Disconnecting peer %d\n", peerId)
 	peer := server.peers[peerId]
-	if peer != nil {
+	if peer != nil && !server.peerList.Exists(peerId) {
 		err := peer.Close()
-		server.peers[peerId] = nil
-		server.peerAddress[peerId] = ""
+		delete(server.peers, peerId)
+		delete(server.peerAddress, peerId)
+		fmt.Printf("Peer %d is disconnected\n", peerId)
 		return err
 	}
 	return nil
@@ -188,18 +206,31 @@ func (server *Server) GetData(key string) ([]byte, bool) {
 	return server.db.Get(key)
 }
 
-func (server *Server) AddAsPeer(serverId uint64) {
+func (server *Server) AddToCluster(serverId uint64) {
 	if serverId == server.id {
 		return
 	}
 	server.mu.Lock()
 	defer server.mu.Unlock()
 	if server.peers[serverId] != nil && !server.peerList.Exists(serverId) {
-		server.node.addAsPeer(serverId)
+		server.node.addPeer(serverId)
 	}
 }
 
-func (server *Server) JoinCluster(leaderId uint64, addr string) error {
+func (server *Server) RemoveFromCluster(serverId uint64) {
+	if serverId == server.id {
+		return
+	}
+	server.mu.Lock()
+	if !server.peerList.Exists(serverId) {
+		server.mu.Unlock()
+		server.DisconnectPeer(serverId)
+		return
+	}
+	server.mu.Unlock()
+}
+
+func (server *Server) RequestToJoinCluster(leaderId uint64, addr string) error {
 	// fmt.Printf("Joining cluster with leader id %d and address: %v\n", leaderId, addr)
 	if leaderId < 0 {
 		fmt.Printf("invalid leader id %d\n", leaderId)
@@ -233,12 +264,8 @@ func (server *Server) JoinCluster(leaderId uint64, addr string) error {
 			// fmt.Printf("Fetched peer list successfully: %v\n", fetchPeerListReply.PeerAddress)
 			for peerId, addr := range fetchPeerListReply.PeerAddress {
 				if peerId != server.id {
-					server.peerAddress[peerId] = addr
+					server.ConnectToPeer(peerId, addr)
 				}
-			}
-			for peerId, addr := range server.peerAddress {
-				// fmt.Printf("Connecting to Peer %d at address %v\n", peerId, addr)
-				server.ConnectToPeer(peerId, addr)
 			}
 			server.node.joinAsPeer(joinClusterReply.LeaderId, fetchPeerListReply.Term, fetchPeerListReply.PeerSet)
 		} else {

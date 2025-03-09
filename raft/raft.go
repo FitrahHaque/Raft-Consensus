@@ -97,6 +97,14 @@ type JoinClusterReply struct {
 	Term     uint64
 }
 
+type LeaveClusterArgs struct {
+	ServerId uint64
+}
+
+type LeaveClusterReply struct {
+	Success bool
+}
+
 type FetchPeerListArgs struct {
 	Term uint64
 }
@@ -181,13 +189,23 @@ func CreateNode(
 // 	return nil
 // }
 
-func (node *Node) addAsPeer(peerId uint64) {
+func (node *Node) addPeer(peerId uint64) {
 	node.mu.Lock()
 	defer node.mu.Unlock()
+
 	node.peerList.Add(peerId)
 	node.nextIndex[peerId] = uint64(len(node.log)) + 1
 	node.matchedIndex[peerId] = 0
 	fmt.Printf("[%d] Added peer %d to cluster\n", node.id, peerId)
+}
+
+func (node *Node) removePeer(peerId uint64) {
+	node.mu.Lock()
+	defer node.mu.Unlock()
+
+	if node.peerList.Exists(peerId) {
+		node.peerList.Remove(peerId)
+	}
 }
 
 func (node *Node) sendCommit() {
@@ -303,7 +321,7 @@ func (node *Node) startElection() {
 }
 
 func (node *Node) becomeLeader() {
-	fmt.Printf("Calling becomeLeader() by %d\n", node.id)
+	fmt.Printf("Node %d has become Leader for Term %d\n", node.id, node.currentTerm)
 	node.state = Leader
 	for peer := range node.peerList.peerSet {
 		node.nextIndex[peer] = uint64(len(node.log)) + 1
@@ -350,7 +368,7 @@ func (node *Node) leaderSendAppendEntries() {
 	go func(peer uint64) {
 		if node.peerList.Size() == 0 {
 			if uint64(len(node.log)) > node.commitLength {
-				fmt.Printf("Before Committing log entries on node %d\n", node.id)
+				// fmt.Printf("Before Committing log entries on node %d\n", node.id)
 				commitLengthSaved := node.commitLength
 				for i := node.commitLength + 1; i <= uint64(len(node.log)); i++ {
 					if node.log[i-1].Term == node.currentTerm {
@@ -358,7 +376,7 @@ func (node *Node) leaderSendAppendEntries() {
 					}
 				}
 				if commitLengthSaved != node.commitLength {
-					fmt.Printf("Committing log entries on node %d\n", node.id)
+					// fmt.Printf("Committing log entries on node %d\n", node.id)
 					node.newCommitReady <- struct{}{}
 					node.trigger <- struct{}{}
 				}
@@ -466,31 +484,54 @@ func (node *Node) joinAsPeer(leaderId uint64, term uint64, peerSet map[uint64]st
 
 func (node *Node) JoinCluster(args JoinClusterArgs, reply *JoinClusterReply) error {
 	node.mu.Lock()
-	defer node.mu.Unlock()
 	// fmt.Printf("JoinCluster RPC from node %d on node %d\n", args.ServerId, node.id)
 	if node.state != Leader {
 		reply.Success = false
 		reply.LeaderId = 0 // Or set this to a known leader if maintained.
 		reply.Term = node.currentTerm
+		node.mu.Unlock()
 		return fmt.Errorf("node %d is not leader (current term %d)", node.id, node.currentTerm)
 	}
-
+	// if node.peerList.Exists(args.ServerId) {
+	// 	reply.Success = false
+	// 	reply.LeaderId = node.id
+	// 	reply.Term = node.currentTerm
+	// 	return fmt.Errorf("server %d already exists in the cluster", args.ServerId)
+	// }
 	reply.LeaderId = node.id
 	reply.Term = node.currentTerm
 	if err := node.server.ConnectToPeer(args.ServerId, args.ServerAddr); err != nil {
 		reply.Success = false
+		node.mu.Unlock()
 		return fmt.Errorf("failed to connect to peer %d: %v\n", args.ServerId, err)
 	}
 	reply.Success = true
 	cmd := AddServer{ServerId: args.ServerId, Addr: args.ServerAddr}
-	node.log = append(node.log, LogEntry{
-		Command: cmd,
-		Term:    node.currentTerm,
-	})
-	node.persistToStorage()
-	node.trigger <- struct{}{}
+	node.mu.Unlock()
 
-	node.debug("Leader %d accepted join request from new server %d", node.id, args.ServerId)
+	go node.newLogEntry(cmd)
+
+	return nil
+}
+
+func (node *Node) LeaveCluster(args LeaveClusterArgs, reply *LeaveClusterReply) error {
+	node.mu.Lock()
+
+	if node.state != Leader {
+		reply.Success = false
+		node.mu.Unlock()
+		return nil
+	}
+	reply.Success = true
+	if !node.peerList.Exists(args.ServerId) {
+		node.mu.Unlock()
+		return nil
+	}
+	cmd := RemoveServer{ServerId: args.ServerId}
+	node.mu.Unlock()
+
+	go node.newLogEntry(cmd)
+
 	return nil
 }
 
@@ -540,16 +581,11 @@ func (node *Node) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesRepl
 				switch v := cmd.(type) {
 				case AddServer:
 					if node.id != v.ServerId {
-						// node.peerList.Add(uint64(v.ServerId)) - do it after commit
-						//*add to peers instead peerList here - connectToPeer logic
 						node.server.ConnectToPeer(v.ServerId, v.Addr)
 					}
-				case RemoveServers:
-					for _, peerId := range v.ServerIds {
-						if node.id == uint64(peerId) || !node.peerList.Exists(uint64(peerId)) {
-							continue
-						}
-						node.peerList.Remove(uint64(peerId))
+				case RemoveServer:
+					if node.id != v.ServerId && node.peerList.Exists(v.ServerId) {
+						node.peerList.Remove(v.ServerId)
 					}
 				}
 			}
@@ -574,16 +610,11 @@ func (node *Node) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesRepl
 		}
 	}
 	reply.Term = node.currentTerm
-	// fmt.Printf("AppendEntries RPC on node %d, state, term = %v, %v\n", node.id, node.state, node.currentTerm)
-	// for i, item := range node.log {
-	// 	fmt.Printf("item %v: (command, term) = (%v,%v)\n", i, item.Command, item.Term)
-	// }
 	node.persistToStorage()
 	return nil
 }
 
 func (node *Node) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) error {
-	// fmt.Printf("Calling RPC RequestVote on %d -> args: %v\n", node.id, args)
 	node.mu.Lock()
 	defer node.mu.Unlock()
 
@@ -594,12 +625,6 @@ func (node *Node) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) err
 	if args.Term > node.currentTerm {
 		node.becomeFollower(args.Term)
 	}
-
-	// fmt.Printf("[RequestVote %d]\n", node.id)
-	// fmt.Printf("args.Term, node.currentTerm): (%v, %v)\n", args.Term, node.currentTerm)
-	// fmt.Printf("args.CandidateId, node.votedFor): (%v, %v)\n", args.CandidateId, node.votedFor)
-	// fmt.Printf("args.LastLogTerm, lastLogTerm): (%v, %v)\n", args.LastLogTerm, lastLogTerm)
-	// fmt.Printf("args.LastLogIndex, lastLogindex): (%v, %v)\n\n", args.LastLogIndex, lastLogIndex)
 
 	if args.Term == node.currentTerm &&
 		(node.votedFor == -1 || node.votedFor == int64(args.CandidateId)) &&
@@ -663,7 +688,6 @@ func (node *Node) restoreFromStorage() {
 }
 
 func (node *Node) readFromStorage(key string, reply interface{}) error {
-	// fmt.Printf("Reading from storage on node: %d\n", node.id)
 	if value, found := node.db.Get(key); found {
 		dec := gob.NewDecoder(bytes.NewBuffer(value))
 		if err := dec.Decode(reply); err != nil {
@@ -676,9 +700,9 @@ func (node *Node) readFromStorage(key string, reply interface{}) error {
 	}
 }
 
-func (node *Node) Submit(command interface{}) (bool, interface{}, error) {
+func (node *Node) newLogEntry(command interface{}) (bool, interface{}, error) {
 	node.mu.Lock()
-	fmt.Printf("[Submit %d] %v\n", node.id, command)
+	// fmt.Printf("[Query %d] %v\n", node.id, command)
 	// fmt.Printf("Running Submit on node %d (leader, term = %v %v)\n", node.id, node.state == Leader, node.currentTerm)
 	if node.state == Leader {
 		switch v := command.(type) {
@@ -690,24 +714,26 @@ func (node *Node) Submit(command interface{}) (bool, interface{}, error) {
 			// fmt.Printf("key, value = %v, %v\n", key, value)
 			node.mu.Unlock()
 			return true, value, readErr
-		case RemoveServers:
-			// fmt.Printf("RemoveServers v: %v\n", v)
-			serverIds := v.ServerIds
-			for i := 0; i < len(serverIds); i++ {
-				if !node.peerList.Exists(uint64(serverIds[i])) && node.id != uint64(serverIds[i]) {
-					node.mu.Lock()
-					return false, nil, errors.New("server with given serverID does not exist")
-				}
+		case AddServer:
+			node.log = append(node.log, LogEntry{
+				Command: command,
+				Term:    node.currentTerm,
+			})
+			node.persistToStorage()
+			node.mu.Unlock()
+			node.trigger <- struct{}{}
+			return true, nil, nil
+		case RemoveServer:
+			if !node.peerList.Exists(v.ServerId) || node.id == v.ServerId {
+				node.mu.Unlock()
+				return false, nil, errors.New("server with id " + fmt.Sprint(v.ServerId) + " cannot be removed from peer " + fmt.Sprint(node.id))
 			}
 			node.log = append(node.log, LogEntry{
 				Command: command,
 				Term:    node.currentTerm,
 			})
-			for i := 0; i < len(serverIds); i++ {
-				if node.id != uint64(serverIds[i]) {
-					node.peerList.Remove(uint64(serverIds[i]))
-				}
-			}
+			node.peerList.Remove(v.ServerId)
+			// fmt.Printf("[%d] Removed peer %d from leader list\n", node.id, v.ServerId)
 			node.persistToStorage()
 			node.mu.Unlock()
 			node.trigger <- struct{}{}
@@ -718,10 +744,6 @@ func (node *Node) Submit(command interface{}) (bool, interface{}, error) {
 				Term:    node.currentTerm,
 			})
 			node.persistToStorage()
-			// fmt.Printf("[Submit %d] log size: %v\n", node.id, len(node.log))
-			// for i, itm := range node.log {
-			// 	fmt.Printf("item %v: (command, term) = (%v,%v)\n", i, item.Command, item.Term)
-			// }
 			node.mu.Unlock()
 			node.trigger <- struct{}{}
 			return true, nil, nil
